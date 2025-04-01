@@ -1,0 +1,16 @@
+{
+  "name": "vibegame-multiplayer",
+  "version": "1.0.0",
+  "description": "Real-time multiplayer version of the vibe game",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
