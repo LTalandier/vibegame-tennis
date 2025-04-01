@@ -3,13 +3,54 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>3D Air Hockey</title>
+    <title>3D Rocket Tennis</title>
+    
+    <!-- Social sharing meta tags -->
+    <meta property="og:title" content="3D Rocket Tennis - Challenge a Friend!">
+    <meta property="og:description" content="Play against a friend in this exciting 3D tennis game. Punch the ball and break walls to win!">
+    <meta property="og:image" content="thumbnail.jpg">
+    <meta property="og:url" content="">
+    <meta name="twitter:card" content="summary_large_image">
+    
     <link rel="stylesheet" href="styles.css">
     <link rel="icon" href="favicon.ico">
+    
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        #game-container {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        .hidden {
+            display: none !important;
+        }
+        #loading {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8);
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            font-size: 24px;
+        }
+    </style>
 </head>
 <body>
     <div id="game-container">
-        <div id="loading" class="hidden">Loading...</div>
+        <div id="loading">Loading...</div>
         <div id="game-over" class="hidden">
             <div class="game-over-content">
                 <h2>Game Over</h2>
@@ -24,6 +65,21 @@
     <script src="https://cdn.jsdelivr.net/npm/nipplejs@0.10.0/dist/nipplejs.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
     <script src="/socket.io/socket.io.js"></script>
+    
+    <!-- Parse URL parameters for game ID -->
+    <script>
+        // Set the og:url meta tag to current URL dynamically
+        document.querySelector('meta[property="og:url"]').setAttribute('content', window.location.href);
+        
+        // This script is only for debugging to see what game ID was passed
+        const urlParams = new URLSearchParams(window.location.search);
+        const gameId = urlParams.get('game');
+        if (gameId) {
+            console.log('Private game ID from URL:', gameId);
+            // Hide loading indicator when loading a private game
+            document.getElementById('loading').innerHTML = `Joining private game ${gameId}...`;
+        }
+    </script>
     
     <!-- Game Scripts -->
     <script src="game.js"></script>

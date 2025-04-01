@@ -101,6 +101,12 @@ let wallBreakParticles = []; // Array to store wall break particle effects
 let playerHealthEl;
 let enemyHealthEl;
 
+// NEW: Game joining variables
+let isPrivateGame = false;
+let privateGameId = null;
+let isWaitingForOpponent = false;
+let shareableLink = null;
+
 // Animation loop - MODIFIED
 function animate() {
     requestAnimationFrame(animate);
@@ -231,6 +237,14 @@ function init() {
     // Check if device is mobile
     isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
     
+    // NEW: Check for game ID in URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const gameIdFromUrl = urlParams.get('game');
+    if (gameIdFromUrl) {
+        privateGameId = gameIdFromUrl;
+        isPrivateGame = true;
+    }
+    
     // NEW: Setup Socket Connection FIRST
     setupSocketConnection();
     
@@ -332,12 +346,84 @@ function setupSocketConnection() {
     socket.on('connect', () => {
         console.log('Connected to server with ID:', socket.id);
         myPlayerId = socket.id;
+        
+        // NEW: After connection, join game based on URL param or random queue
+        if (isPrivateGame && privateGameId) {
+            console.log(`Attempting to join private game: ${privateGameId}`);
+            socket.emit('join_game', { gameId: privateGameId });
+            showWaitingScreen(`Joining private game ${privateGameId}...`);
+        } else {
+            console.log('Joining random matchmaking queue');
+            socket.emit('join_game'); // No game ID means random matchmaking
+            showWaitingScreen('Finding an opponent...');
+        }
+    });
+
+    // NEW: Handle private game creation result
+    socket.on('private_game_created', (data) => {
+        console.log('Private game created:', data);
+        privateGameId = data.gameId;
+        shareableLink = data.shareableLink;
+        isPrivateGame = true;
+        isWaitingForOpponent = true;
+        
+        // Update waiting screen with game code for sharing
+        showWaitingScreen(`Waiting for opponent to join...<br>Game code: <strong>${data.gameId}</strong><br><br>Share this link:<br><input type="text" id="share-link" value="${data.shareableLink}" readonly onclick="this.select();">`);
+        
+        // Add copy button functionality
+        const shareInput = document.getElementById('share-link');
+        if (shareInput) {
+            shareInput.addEventListener('click', function() {
+                this.select();
+                try {
+                    document.execCommand('copy');
+                    alert('Link copied to clipboard!');
+                } catch (err) {
+                    console.error('Could not copy text:', err);
+                }
+            });
+        }
+    });
+
+    // NEW: Handle waiting for opponent
+    socket.on('waiting_for_opponent', (data) => {
+        console.log('Waiting for opponent to join game:', data.gameId);
+        isWaitingForOpponent = true;
+        showWaitingScreen('Waiting for another player to join...');
+    });
+
+    // NEW: Handle waiting for random match
+    socket.on('waiting_for_random_match', () => {
+        console.log('Added to random matchmaking queue');
+        isWaitingForOpponent = true;
+        showWaitingScreen('Finding an opponent...');
+    });
+
+    // NEW: Handle game join failure
+    socket.on('game_join_failed', (data) => {
+        console.error('Failed to join game:', data.error);
+        showErrorScreen(`Failed to join game: ${data.error}`);
+    });
+
+    // NEW: Handle private game expiry
+    socket.on('private_game_expired', (data) => {
+        if (isWaitingForOpponent) {
+            showErrorScreen('Game expired. No one joined your private game.');
+        }
+    });
+
+    // NEW: Handle opponent left
+    socket.on('opponent_left', (data) => {
+        showNotification('Your opponent left the game');
     });
 
     socket.on('player_assignment', (data) => {
         if (data.playerId === myPlayerId) {
             myPlayerNumber = data.playerNumber;
             console.log(`Assigned as Player ${myPlayerNumber}`);
+            
+            // NEW: Hide waiting screen when assigned to a game
+            hideWaitingScreen();
 
             // Now set initial position based on player number
             // Simplified: Assuming single court for now (like server.js)
@@ -1481,6 +1567,31 @@ function createUI() {
     resumeBtn.style.cursor = 'pointer';
     pauseContent.appendChild(resumeBtn);
     
+    // NEW: Add "Create Private Game" button
+    const createPrivateBtn = document.createElement('button');
+    createPrivateBtn.textContent = 'Create Private Game';
+    createPrivateBtn.style.margin = '10px';
+    createPrivateBtn.style.padding = '10px 20px';
+    createPrivateBtn.style.background = '#3498db';
+    createPrivateBtn.style.color = 'white';
+    createPrivateBtn.style.border = 'none';
+    createPrivateBtn.style.borderRadius = '5px';
+    createPrivateBtn.style.cursor = 'pointer';
+    createPrivateBtn.addEventListener('click', createNewPrivateGame);
+    pauseContent.appendChild(createPrivateBtn);
+    
+    // NEW: Add game info section if in a private game
+    const gameInfoSection = document.createElement('div');
+    gameInfoSection.id = 'game-info-section';
+    gameInfoSection.style.marginTop = '20px';
+    gameInfoSection.style.padding = '10px';
+    gameInfoSection.style.border = '1px solid #ddd';
+    gameInfoSection.style.borderRadius = '5px';
+    gameInfoSection.style.display = 'none'; // Hidden by default
+    
+    pauseContent.appendChild(gameInfoSection);
+    updateGameInfoSection(); // Initialize or update with current game info
+    
     pauseMenu.appendChild(pauseContent);
     document.getElementById('game-container').appendChild(pauseMenu);
     
@@ -1531,6 +1642,9 @@ function createUI() {
         }
     });
 
+    // NEW: Add waiting screen for matchmaking
+    createWaitingScreen();
+    
     // Add mobile controls only if on mobile device
     if (isMobile) {
         // Add label for Y-axis control
@@ -1575,7 +1689,7 @@ function createUI() {
         // For desktop testing of mobile mode - removed
     }
     
-    // Add position display element
+    // Create position display
     const positionDisplay = document.createElement('div');
     positionDisplay.id = 'position-display';
     positionDisplay.style.position = 'absolute';
@@ -1588,12 +1702,12 @@ function createUI() {
     positionDisplay.style.fontFamily = 'monospace';
     positionDisplay.style.fontSize = '14px';
     positionDisplay.style.zIndex = '100';
+    positionDisplay.style.display = 'none'; // Hide by default until game is fully loaded
     document.getElementById('game-container').appendChild(positionDisplay);
 }
 
 // Toggle pause state
 function togglePause() {
-    // Pause might need server-side logic if it should pause for both players
     gamePaused = !gamePaused;
     
     const pauseMenu = document.getElementById('pause-menu');
@@ -3011,8 +3125,11 @@ window.addEventListener('DOMContentLoaded', init);
 // Update player position display
 function updatePositionDisplay() {
     const display = document.getElementById('position-display');
-    // Ensure player exists before accessing position
-    if (display && player && player.position) {
+    // Ensure player exists before accessing position and that the game is running
+    if (display && player && player.position && gameRunning && !isWaitingForOpponent) {
+        // Make sure the display is visible when game is running
+        display.style.display = 'block';
+        
         const px = player.position.x.toFixed(2);
         const py = player.position.y.toFixed(2);
         const pz = player.position.z.toFixed(2);
@@ -3028,19 +3145,16 @@ function updatePositionDisplay() {
             opponentText = `Opponent: X: ${ox} | Y: ${oy} | Z: ${oz}`;
         }
 
-
         // Court display needs server-side state (currentCourtIndex)
-        // const middleCourtIndex = Math.floor(totalCourts / 2);
-        // const currentZOffset = (currentCourtIndex - middleCourtIndex) * COURT_LENGTH;
-        // const courtMinZ = -currentZOffset - COURT_LENGTH/2;
-        // const courtMaxZ = -currentZOffset + COURT_LENGTH/2;
-        // let courtText = `Court: ${currentCourtIndex+1}/${totalCourts} (Z: ${courtMinZ.toFixed(2)} to ${courtMaxZ.toFixed(2)})`;
         let courtText = "Court: (Syncing...)"; // Placeholder
 
         display.innerHTML = 
             `<div>Player ${myPlayerNumber || ''}: X: ${px} | Y: ${py} | Z: ${pz}</div>
              <div>${opponentText}</div>
              <div>${courtText}</div>`;
+    } else if (display) {
+        // Hide display if waiting for opponent or game not running
+        display.style.display = 'none';
     }
 }
 
@@ -3268,4 +3382,207 @@ function flashElement(element, color) {
     setTimeout(() => {
         element.style.backgroundColor = originalBackground;
     }, 500);
+}
+
+// NEW: Create waiting screen for matchmaking
+function createWaitingScreen() {
+    const waitingScreen = document.createElement('div');
+    waitingScreen.id = 'waiting-screen';
+    waitingScreen.style.position = 'absolute';
+    waitingScreen.style.top = '0';
+    waitingScreen.style.left = '0';
+    waitingScreen.style.width = '100%';
+    waitingScreen.style.height = '100%';
+    waitingScreen.style.background = 'rgba(0, 0, 0, 0.8)';
+    waitingScreen.style.display = 'flex';
+    waitingScreen.style.justifyContent = 'center';
+    waitingScreen.style.alignItems = 'center';
+    waitingScreen.style.zIndex = '300';
+    waitingScreen.style.flexDirection = 'column';
+    waitingScreen.style.display = 'none'; // Start hidden
+    
+    const waitingContent = document.createElement('div');
+    waitingContent.style.color = 'white';
+    waitingContent.style.textAlign = 'center';
+    waitingContent.style.maxWidth = '80%';
+    
+    const waitingTitle = document.createElement('h2');
+    waitingTitle.id = 'waiting-message';
+    waitingTitle.style.marginBottom = '20px';
+    waitingTitle.textContent = 'Finding an opponent...';
+    waitingContent.appendChild(waitingTitle);
+    
+    // Animated loading indicator
+    const loadingIndicator = document.createElement('div');
+    loadingIndicator.style.display = 'inline-block';
+    loadingIndicator.style.position = 'relative';
+    loadingIndicator.style.width = '80px';
+    loadingIndicator.style.height = '80px';
+    
+    // Create animated dots
+    for (let i = 0; i < 4; i++) {
+        const dot = document.createElement('div');
+        dot.style.position = 'absolute';
+        dot.style.top = '33px';
+        dot.style.width = '13px';
+        dot.style.height = '13px';
+        dot.style.borderRadius = '50%';
+        dot.style.background = '#fff';
+        dot.style.animation = 'loading 1.2s cubic-bezier(0, 0.5, 0.5, 1) infinite';
+        dot.style.animationDelay = `${-0.3 * i}s`;
+        dot.style.left = `${8 + (i * 20)}px`;
+        loadingIndicator.appendChild(dot);
+    }
+    
+    waitingContent.appendChild(loadingIndicator);
+    
+    // Add the share section (will be populated later if needed)
+    const shareSection = document.createElement('div');
+    shareSection.id = 'share-section';
+    shareSection.style.marginTop = '20px';
+    waitingContent.appendChild(shareSection);
+    
+    waitingScreen.appendChild(waitingContent);
+    document.getElementById('game-container').appendChild(waitingScreen);
+    
+    // Add the CSS for the loading animation
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes loading {
+        0% { transform: scale(0); }
+        50% { transform: scale(1); }
+        100% { transform: scale(0); }
+      }
+    `;
+    document.head.appendChild(style);
+}
+
+// NEW: Show waiting screen with custom message
+function showWaitingScreen(message) {
+    const waitingScreen = document.getElementById('waiting-screen');
+    const waitingMessage = document.getElementById('waiting-message');
+    
+    if (waitingScreen && waitingMessage) {
+        waitingMessage.innerHTML = message;
+        waitingScreen.style.display = 'flex';
+    }
+}
+
+// NEW: Hide waiting screen
+function hideWaitingScreen() {
+    const waitingScreen = document.getElementById('waiting-screen');
+    if (waitingScreen) {
+        waitingScreen.style.display = 'none';
+    }
+    
+    // Make sure the debug position display is hidden until game is properly running
+    const positionDisplay = document.getElementById('position-display');
+    if (positionDisplay) {
+        positionDisplay.style.display = 'none';
+    }
+    
+    // Also hide the loading indicator
+    const loadingScreen = document.getElementById('loading');
+    if (loadingScreen) {
+        loadingScreen.style.display = 'none';
+    }
+}
+
+// NEW: Show error screen
+function showErrorScreen(message) {
+    const waitingScreen = document.getElementById('waiting-screen');
+    const waitingMessage = document.getElementById('waiting-message');
+    
+    if (waitingScreen && waitingMessage) {
+        waitingMessage.innerHTML = `<span style="color: #e74c3c;">${message}</span><br><button id="error-retry-btn" style="margin-top: 20px; padding: 10px 20px; background: #3498db; color: white; border: none; border-radius: 5px; cursor: pointer;">Back to Main Menu</button>`;
+        waitingScreen.style.display = 'flex';
+        
+        // Add event listener to retry button
+        const retryBtn = document.getElementById('error-retry-btn');
+        if (retryBtn) {
+            retryBtn.addEventListener('click', function() {
+                window.location.href = window.location.origin + window.location.pathname;
+            });
+        }
+    }
+}
+
+// NEW: Show notification
+function showNotification(message) {
+    const notification = document.createElement('div');
+    notification.textContent = message;
+    notification.style.position = 'absolute';
+    notification.style.top = '80px';
+    notification.style.left = '50%';
+    notification.style.transform = 'translateX(-50%)';
+    notification.style.background = 'rgba(0, 0, 0, 0.8)';
+    notification.style.color = 'white';
+    notification.style.padding = '10px 20px';
+    notification.style.borderRadius = '5px';
+    notification.style.zIndex = '150';
+    document.getElementById('game-container').appendChild(notification);
+    
+    // Remove after 3 seconds
+    setTimeout(() => {
+        notification.style.opacity = '0';
+        notification.style.transition = 'opacity 0.5s';
+        setTimeout(() => notification.remove(), 500);
+    }, 3000);
+}
+
+// NEW: Update game info section in pause menu
+function updateGameInfoSection() {
+    const gameInfoSection = document.getElementById('game-info-section');
+    if (!gameInfoSection) return;
+    
+    if (isPrivateGame && privateGameId) {
+        gameInfoSection.style.display = 'block';
+        gameInfoSection.innerHTML = `
+            <p><strong>Private Game</strong></p>
+            <p>Game Code: ${privateGameId}</p>
+            ${shareableLink ? `
+                <p>Share this link:</p>
+                <div style="display: flex; margin-bottom: 10px;">
+                    <input type="text" id="pause-share-link" value="${shareableLink}" readonly style="flex: 1; padding: 5px; border-radius: 3px 0 0 3px; border: 1px solid #ccc;">
+                    <button id="copy-link-btn" style="padding: 5px 10px; background: #3498db; color: white; border: none; border-radius: 0 3px 3px 0; cursor: pointer;">Copy</button>
+                </div>
+            ` : ''}
+        `;
+        
+        // Add copy functionality
+        setTimeout(() => {
+            const copyBtn = document.getElementById('copy-link-btn');
+            const shareLink = document.getElementById('pause-share-link');
+            if (copyBtn && shareLink) {
+                copyBtn.addEventListener('click', function() {
+                    shareLink.select();
+                    try {
+                        document.execCommand('copy');
+                        this.textContent = 'Copied!';
+                        setTimeout(() => { this.textContent = 'Copy'; }, 1500);
+                    } catch (err) {
+                        console.error('Could not copy text:', err);
+                    }
+                });
+            }
+        }, 0);
+    } else {
+        gameInfoSection.style.display = 'none';
+    }
+}
+
+// NEW: Create a new private game
+function createNewPrivateGame() {
+    if (socket && socket.connected) {
+        // Close pause menu first
+        togglePause();
+        
+        // Show waiting screen
+        showWaitingScreen('Creating private game...');
+        
+        // Request private game from server
+        socket.emit('create_private_game');
+    } else {
+        showNotification('Cannot create game: Not connected to server');
+    }
 }

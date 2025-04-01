@@ -29,6 +29,12 @@ const MIDDLE_COURT_INDEX = Math.floor(TOTAL_COURTS / 2);
 const WINS_NEEDED = Math.ceil(TOTAL_COURTS / 2); // Wins needed to win the game (break middle + opponent final wall)
 // --- End Multi-Court Constants ---
 
+// --- NEW: Private Game Management ---
+const privateGames = new Map(); // Map to track private games by game ID
+const randomQueue = []; // Queue of players waiting for random matches
+const PRIVATE_GAME_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+// --- End Private Game Management ---
+
 // --- Vector Math Helpers ---
 function vecLength(v) {
     return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
@@ -97,6 +103,22 @@ let gameState = {
 
 io.on('connection', (socket) => {
     console.log('A user connected:', socket.id);
+
+    // Handle join method detection (random or private)
+    socket.on('join_game', (data) => {
+        if (data && data.gameId) {
+            // Join private game
+            joinPrivateGame(socket, data.gameId);
+        } else {
+            // Join random game
+            joinRandomGame(socket);
+        }
+    });
+
+    // Handle private game creation request
+    socket.on('create_private_game', () => {
+        createPrivateGame(socket);
+    });
 
     // Assign player number (1 or 2)
     let playerNumber;
@@ -253,6 +275,34 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         console.log('User disconnected:', socket.id);
+        
+        // Remove from random queue if present
+        const queueIndex = randomQueue.indexOf(socket.id);
+        if (queueIndex !== -1) {
+            randomQueue.splice(queueIndex, 1);
+        }
+        
+        // Check if part of a private game
+        let privateGameId = null;
+        for (const [gameId, game] of privateGames.entries()) {
+            if (game.players.has(socket.id)) {
+                privateGameId = gameId;
+                game.players.delete(socket.id);
+                
+                // Notify remaining player
+                if (game.players.size > 0) {
+                    const remainingPlayerId = Array.from(game.players.keys())[0];
+                    io.to(remainingPlayerId).emit('opponent_left', { message: 'Your opponent left the game' });
+                }
+                
+                // If no players left, clean up the game
+                if (game.players.size === 0) {
+                    privateGames.delete(gameId);
+                }
+                break;
+            }
+        }
+        
         const player = gameState.players[socket.id];
         if (player) {
             // Notify other players
@@ -624,6 +674,148 @@ function triggerCourtTransition(newCourtIndex) {
     // io.emit('court_transition', { newCourtIndex: newCourtIndex, gameState: gameState });
 }
 // --- End NEW triggerCourtTransition ---
+
+// --- NEW: Function to create a private game ---
+function createPrivateGame(socket) {
+    // Generate a unique game ID (simple implementation)
+    const gameId = generateGameId();
+    
+    // Create game entry
+    privateGames.set(gameId, {
+        players: new Set([socket.id]),
+        created: Date.now(),
+        gameState: null // Will be initialized when game starts
+    });
+    
+    // Send game ID to creator
+    socket.emit('private_game_created', { 
+        gameId: gameId,
+        shareableLink: `${socket.handshake.headers.origin}?game=${gameId}`
+    });
+    
+    console.log(`Private game created: ${gameId} by player ${socket.id}`);
+    
+    // Set expiry for unused games
+    setTimeout(() => {
+        const game = privateGames.get(gameId);
+        if (game && game.players.size < 2) {
+            privateGames.delete(gameId);
+            console.log(`Private game expired: ${gameId}`);
+            // Notify creator if they're still connected
+            if (io.sockets.sockets.has(socket.id)) {
+                socket.emit('private_game_expired', { gameId });
+            }
+        }
+    }, PRIVATE_GAME_EXPIRY);
+}
+
+// --- Function to join a private game ---
+function joinPrivateGame(socket, gameId) {
+    // Check if game exists
+    if (!privateGames.has(gameId)) {
+        socket.emit('game_join_failed', { error: 'Game not found' });
+        return;
+    }
+    
+    const game = privateGames.get(gameId);
+    
+    // Check if game is full
+    if (game.players.size >= 2) {
+        socket.emit('game_join_failed', { error: 'Game is full' });
+        return;
+    }
+    
+    // Add player to game
+    game.players.add(socket.id);
+    
+    // If game now has 2 players, start it
+    if (game.players.size === 2) {
+        const players = Array.from(game.players);
+        
+        // Assign player numbers
+        initializePrivateGamePlayers(players[0], 1); // Creator is player 1
+        initializePrivateGamePlayers(players[1], 2); // Joiner is player 2
+        
+        // Start the game
+        console.log(`Starting private game ${gameId} with players ${players[0]} and ${players[1]}`);
+    } else {
+        // Waiting for another player
+        socket.emit('waiting_for_opponent', { gameId });
+    }
+}
+
+// --- Function to join a random game ---
+function joinRandomGame(socket) {
+    // If someone is in queue, match them
+    if (randomQueue.length > 0) {
+        const opponentId = randomQueue.shift();
+        
+        // Make sure opponent is still connected
+        if (!io.sockets.sockets.has(opponentId)) {
+            // Opponent disconnected, put current player in queue
+            randomQueue.push(socket.id);
+            return;
+        }
+        
+        // Assign player numbers (first in queue is player 1)
+        initializePrivateGamePlayers(opponentId, 1);
+        initializePrivateGamePlayers(socket.id, 2);
+        
+        console.log(`Matched random players ${opponentId} and ${socket.id}`);
+    } else {
+        // Add to queue
+        randomQueue.push(socket.id);
+        socket.emit('waiting_for_random_match');
+    }
+}
+
+// --- Helper function to initialize players when a game starts ---
+function initializePrivateGamePlayers(socketId, playerNumber) {
+    const socket = io.sockets.sockets.get(socketId);
+    if (!socket) return;
+    
+    // Initialize player state
+    gameState.players[socketId] = {
+        id: socketId,
+        number: playerNumber,
+        // Position relative to the STARTING (middle) court's center
+        position: { x: 0, y: PLAYER_SIZE * 2, z: calculatePlayerStartZ(playerNumber, MIDDLE_COURT_INDEX) },
+        velocity: { x: 0, y: 0, z: 0 },
+        // Add other relevant player states from game.js (like charge, punch state etc.)
+        isCharging: false,
+        chargePower: 1.0
+    };
+
+    console.log(`Player ${playerNumber} assigned to ${socketId}`);
+    socket.emit('player_assignment', { playerId: socketId, playerNumber: playerNumber });
+
+    // Send initial game state to the player
+    socket.emit('initial_state', {
+        playerId: socketId,
+        playerNumber: playerNumber,
+        gameState: gameState // Send current players, ball, walls
+    });
+
+    // Notify other players about the new player
+    socket.broadcast.emit('new_player', gameState.players[socketId]);
+}
+
+// --- Generate a random game ID ---
+function generateGameId() {
+    // Simple implementation - 6 character alphanumeric code
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Omitting easily confused characters
+    let result = '';
+    for (let i = 0; i < 6; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    
+    // Ensure uniqueness
+    if (privateGames.has(result)) {
+        return generateGameId(); // Regenerate if collision
+    }
+    
+    return result;
+}
 
 server.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
